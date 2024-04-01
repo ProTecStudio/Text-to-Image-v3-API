@@ -60,6 +60,22 @@ async function isValidAndroidId(androidId) {
     return true;
 }
 
+app.get('/banlist', async (req, res) => {
+    try {
+        const bannedUsers = await User.find({ userType: 'BANNED' });
+
+        // Extracting user Android IDs from bannedUsers
+        const bannedUserIds = bannedUsers.map(user => user.username);
+
+        // Returning JSON response with status code 200 and list of banned user IDs
+        res.status(200).json({ code: "200", bannedUsers: bannedUserIds });
+    } catch (error) {
+        console.error("Error retrieving list of banned users:", error);
+        res.status(500).json({ error: 'Internal server error. Please try again later.' });
+    }
+});
+
+
 app.get('/add', async (req, res) => {
     const androidId = req.query.id;
 
@@ -96,19 +112,16 @@ app.get('/check/:androidId', async (req, res) => {
     try {
         const androidId = req.params.androidId;
 
-
         const isValidId = isValidAndroidId(androidId);
         if (!isValidId) {
             return res.status(400).json({ error: 'Invalid Android ID.' });
         }
-
 
         const user = await User.findOne({ username: androidId });
 
         if (!user) {
             return res.status(404).json({ error: 'User not found.' });
         }
-
 
         const userType = user.userType === 'PAID' ? 'PAID' : 'FREE';
         res.json({ msg: userType });
@@ -118,6 +131,61 @@ app.get('/check/:androidId', async (req, res) => {
     }
 });
 
+app.get('/info/:androidId', async (req, res) => {
+    try {
+        const androidId = req.params.androidId;
+
+        // Validate Android ID format
+        if (!isValidAndroidId(androidId)) {
+            return res.status(400).json({ error: 'Invalid Android ID format.' });
+        }
+
+        // Find the user in the database
+        const user = await User.findOne({ username: androidId });
+
+        // If user not found, return error
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        // Return user details
+        res.json({
+            username: user.username,
+            lastRequestTimestamp: user.lastRequestTimestamp,
+            requestsMade: user.requestsMade,
+            userType: user.userType,
+            premiumExpiration: user.premiumExpiration
+        });
+    } catch (error) {
+        console.error("Error retrieving user data:", error);
+        res.status(500).json({ error: 'Internal server error. Please try again later.' });
+    }
+});
+
+app.get('/ban/:androidId', async (req, res) => {
+    try {
+        const androidId = req.params.androidId;
+
+        const isValidId = isValidAndroidId(androidId);
+        if (!isValidId) {
+            return res.status(400).json({ error: 'Invalid Android ID.' });
+        }
+
+        let user = await User.findOne({ username: androidId });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        user.userType = 'BANNED';
+        await user.save();
+
+        res.json({ message: 'User banned successfully.' });
+    } catch (error) {
+        console.error("Error banning user:", error);
+        res.status(500).json({ error: 'Internal server error. Please try again later.' });
+    }
+});
 
 app.get('/prompt', async (req, res) => {
     const prompt = req.query.prompt;
@@ -134,26 +202,29 @@ app.get('/prompt', async (req, res) => {
             return res.status(403).json({ error: 'Invalid Android ID.' });
         }
 
-        const response = await fetch(`http://ip-api.com/json/${ipAddress}`);
-        const ipInfo = await response.json();
+        let user = await User.findOne({ username: androidId });
 
-        if (!ipInfo || ipInfo.proxy || ipInfo.vpn) {
-            return res.status(403).json({ error: 'Invalid or VPN IP address.' });
+        // If the user is not found, create a new user with status "FREE"
+        if (!user) {
+            const expirationDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+            user = await User.create({ username: androidId, lastRequestTimestamp: Date.now(), requestsMade: 1, userType: 'FREE', premiumExpiration: expirationDate });
         }
 
-        let user = await User.findOne({ username: androidId });
+        // If the user is banned, return an error
+        if (user.userType === 'BANNED') {
+            return res.status(403).json({ error: 'User is banned. Upgrade to pro to access the service.' });
+        }
+
+        // If the user is a free user and has exceeded the daily limit, return an error
+        if (user.userType === 'FREE' && user.requestsMade >= 3) {
+            return res.status(403).json({ error: 'Daily limit exceeded for free users. Upgrade to pro for unlimited access.' });
+        }
+
         const now = Date.now();
 
-        if (!user || (user.lastRequestTimestamp && (now - user.lastRequestTimestamp) >= 24 * 60 * 60 * 1000)) {
-            user = await User.findOneAndUpdate(
-                { username: androidId },
-                { lastRequestTimestamp: now, requestsMade: 0, userType: 'free', premiumExpiration: null },
-                { upsert: true, new: true }
-            );
-        }
-
-        if (user.userType === 'free' && user.requestsMade >= 3) {
-            return res.status(403).json({ error: 'Daily limit exceeded for free users. Upgrade to pro for unlimited access.' });
+        // Reset requests made if it's a new day
+        if (user.lastRequestTimestamp && !isSameDay(now, user.lastRequestTimestamp)) {
+            user.requestsMade = 0;
         }
 
         user.requestsMade++;
@@ -229,32 +300,16 @@ async function getProLLMResponse(prompt) {
         return { error: 'Internal server error. Please try again later.' };
     }
 }
-/*
-async function sendDeployHookRequest() {
-    try {
-        const deployKey = process.env.DEPLOY_KEY;
-        const response = await fetch(`https://api.render.com/deploy/srv-cnjggcuct0pc73cb0atg?key=${deployKey}`, { method: 'POST' });
-        if (!response.ok) {
-            console.error('Failed to send deploy hook request');
-        } else {
-            console.log('Deploy hook request sent successfully');
-        }
-    } catch (error) {
-        console.error('Error sending deploy hook request:', error);
-    }
-}
-
-function scheduleTasks() {
-    sendDeployHookRequest();
-
-    setTimeout(scheduleTasks, 5 * 60 * 1000);
-}
-
-scheduleTasks();
-*/
-
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
+
+function isSameDay(date1, date2) {
+    const d1 = new Date(date1);
+    const d2 = new Date(date2);
+    return d1.getFullYear() === d2.getFullYear() &&
+        d1.getMonth() === d2.getMonth() &&
+        d1.getDate() === d2.getDate();
+}
